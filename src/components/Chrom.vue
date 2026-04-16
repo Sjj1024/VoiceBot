@@ -44,10 +44,6 @@ const status = ref('就绪：请用 Chrome / Edge 打开，并允许麦克风权
 const isConversing = ref(false)
 const isProcessing = ref(false)
 
-const openclawBase = (import.meta.env.VITE_OPENCLAW_URL || '').trim()
-const openclawApiKey = (import.meta.env.VITE_OPENCLAW_API_KEY || '').trim()
-const openclawModel = (import.meta.env.VITE_OPENCLAW_MODEL || '').trim()
-
 /** 停顿超过该时间（毫秒）认为一句说完，触发自动回复 */
 const silenceMs = 1450
 
@@ -108,7 +104,7 @@ const finishUserUtterance = async (text) => {
     if (!trimmed) return
 
     messages.value.push({ role: 'user', content: trimmed })
-    const rawReply = await callOpenClaw(trimmed)
+    const rawReply = await callAI(trimmed)
     const reply = stripEmojis(rawReply)
     messages.value.push({ role: 'assistant', content: reply })
 
@@ -296,48 +292,31 @@ const stopConversation = () => {
 }
 
 // 调用 AI（你可以换成 DeepSeek）
-const callOpenClaw = async (text) => {
-    const base = openclawBase || '/openclaw-api'
-    const url = `${base.replace(/\/+$/, '')}/v1/chat/completions`
-
-    const headers = { 'Content-Type': 'application/json' }
-    if (openclawApiKey) headers.Authorization = `Bearer ${openclawApiKey}`
-
-    const res = await fetch(url, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-            model: openclawModel || 'openclaw/default',
-            messages: [
-                {
-                    role: 'system',
-                    content:
-                        '回答请使用纯文本：不要输出任何表情符号、emoji、绘文字或颜文字；不要使用特殊装饰性符号；标点仅用中文常用标点。',
-                },
-                { role: 'user', content: text },
-            ],
-        }),
-    })
-
-    if (!res.ok) {
-        const errText = await res.text().catch(() => '')
-        throw new Error(
-            `openclaw 接口请求失败：HTTP ${res.status} ${res.statusText}${
-                errText ? `\n${errText.slice(0, 1200)}` : ''
-            }`
-        )
-    }
+const callAI = async (text) => {
+    const res = await fetch(
+        'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
+        {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                Authorization: 'Bearer sk-0a564ebc8daa48d69002273afe06c0ca',
+            },
+            body: JSON.stringify({
+                model: 'qwen-plus',
+                messages: [
+                    {
+                        role: 'system',
+                        content:
+                            '回答请使用纯文本：不要输出任何表情符号、emoji、绘文字或颜文字；不要使用特殊装饰性符号；标点仅用中文常用标点。',
+                    },
+                    { role: 'user', content: text },
+                ],
+            }),
+        }
+    )
 
     const data = await res.json()
-    const content = data?.choices?.[0]?.message?.content
-    if (typeof content !== 'string') {
-        throw new Error(
-            `openclaw 返回格式不符合预期（缺少 choices[0].message.content）：${JSON.stringify(
-                data
-            ).slice(0, 1200)}`
-        )
-    }
-    return content
+    return data.choices[0].message.content
 }
 </script>
 
