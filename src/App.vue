@@ -618,6 +618,7 @@ const callOpenClaw = async (text) => {
 .actions {
     display: flex;
     flex-wrap: wrap;
+    justify-content: center;
     gap: 10px;
     margin-top: 16px;
 }
