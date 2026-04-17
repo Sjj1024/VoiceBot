@@ -1,37 +1,85 @@
 <template>
-    <div class="container">
-        <h2>🎤 AI语音助手</h2>
+    <div class="page">
+        <main class="card">
+            <header class="card-head">
+                <div class="title-block">
+                    <span class="title">语音助手</span>
+                    <span class="subtitle">
+                        停顿约 {{ silenceMs }}ms 视为一句说完
+                    </span>
+                </div>
+                <span
+                    class="live-pill"
+                    :class="{
+                        on: isConversing && !isProcessing,
+                        busy: isProcessing,
+                    }"
+                >
+                    {{
+                        isThinking
+                            ? '思考中'
+                            : isProcessing
+                            ? '处理中'
+                            : isConversing
+                            ? '聆听中'
+                            : '未开始'
+                    }}
+                </span>
+            </header>
 
-        <div class="chat-box">
-            <div v-for="(msg, i) in messages" :key="i" :class="msg.role">
-                {{ msg.content }}
+            <div class="chat-scroll" role="log" aria-live="polite">
+                <div
+                    v-if="messages.length === 0 && !userText"
+                    class="chat-empty"
+                >
+                    开始对话后，你的发言会出现在这里。
+                </div>
+                <div
+                    v-for="(msg, i) in messages"
+                    :key="i"
+                    class="row"
+                    :class="msg.role"
+                >
+                    <div class="bubble">{{ msg.content }}</div>
+                </div>
             </div>
-        </div>
 
-        <div class="controls">
-            <button
-                type="button"
-                :disabled="isConversing"
-                @click="startConversation"
-            >
-                🎤 开始对话
-            </button>
-            <button
-                type="button"
-                :disabled="!isConversing"
-                @click="stopConversation"
-            >
-                ⏹ 结束对话
-            </button>
-        </div>
+            <transition name="fade">
+                <div v-if="isThinking" class="thinking-bar" role="status">
+                    <span class="thinking-spinner" aria-hidden="true" />
+                    <span class="thinking-text">请等待思考完毕</span>
+                </div>
+            </transition>
 
-        <p class="status">{{ status }}</p>
-        <p class="hint">
-            对话模式：你在说话时持续识别；停顿约
-            {{ silenceMs }}
-            毫秒视为说完并自动回复；播报时麦克风会关闭，播完再继续听。
-        </p>
-        <p>当前识别：{{ userText || '（暂无）' }}</p>
+            <div class="live-caption">
+                <span class="live-label">当前识别</span>
+                <span class="live-value">{{ userText || '—' }}</span>
+            </div>
+
+            <div class="actions">
+                <button
+                    type="button"
+                    class="btn primary"
+                    :disabled="isConversing"
+                    @click="startConversation"
+                >
+                    开始对话
+                </button>
+                <button
+                    type="button"
+                    class="btn ghost"
+                    :disabled="!isConversing"
+                    @click="stopConversation"
+                >
+                    结束对话
+                </button>
+            </div>
+
+            <p class="status-line">{{ status }}</p>
+            <p class="hint">
+                持续识别语音；说完稍停顿即自动请求回复。播报时麦克风会暂时关闭，播完后继续听。
+            </p>
+        </main>
     </div>
 </template>
 
@@ -43,6 +91,8 @@ const userText = ref('')
 const status = ref('就绪：请用 Chrome / Edge 打开，并允许麦克风权限')
 const isConversing = ref(false)
 const isProcessing = ref(false)
+/** 正在等待模型 HTTP 返回（区别于播报阶段的 isProcessing） */
+const isThinking = ref(false)
 
 const openclawBase = (import.meta.env.VITE_OPENCLAW_URL || '').trim()
 const openclawApiKey = (import.meta.env.VITE_OPENCLAW_API_KEY || '').trim()
@@ -108,7 +158,23 @@ const finishUserUtterance = async (text) => {
     if (!trimmed) return
 
     messages.value.push({ role: 'user', content: trimmed })
-    const rawReply = await callOpenClaw(trimmed)
+    isThinking.value = true
+    status.value = '请等待思考完毕…'
+    let rawReply
+    try {
+        rawReply = await callOpenClaw(trimmed)
+    } catch (e) {
+        console.error(e)
+        status.value = `回复失败：${e.message}`
+        messages.value.push({
+            role: 'assistant',
+            content: `（请求失败）${e.message}`,
+        })
+        return
+    } finally {
+        isThinking.value = false
+    }
+
     const reply = stripEmojis(rawReply)
     messages.value.push({ role: 'assistant', content: reply })
 
@@ -341,47 +407,275 @@ const callOpenClaw = async (text) => {
 }
 </script>
 
-<style>
-.container {
-    max-width: 600px;
-    margin: 40px auto;
+<style scoped>
+.page {
+    min-height: 100vh;
+    box-sizing: border-box;
+    padding: clamp(20px, 4vw, 40px) 126px 48px;
+    background: radial-gradient(
+            1200px 600px at 10% -10%,
+            #e8eeff 0%,
+            transparent 55%
+        ),
+        radial-gradient(900px 500px at 100% 0%, #f3e8ff 0%, transparent 50%),
+        #f4f5f7;
+    font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'PingFang SC',
+        'Microsoft YaHei', sans-serif;
+    color: #1a1d26;
 }
 
-.chat-box {
-    border: 1px solid #ccc;
-    padding: 10px;
-    height: 300px;
+.card {
+    /* max-width: 560px; */
+    margin: 0 auto;
+    background: #fff;
+    border-radius: 20px;
+    box-shadow: 0 12px 40px rgba(15, 23, 42, 0.08),
+        0 1px 0 rgba(255, 255, 255, 0.8) inset;
+    border: 1px solid rgba(15, 23, 42, 0.06);
+    padding: 22px 22px 20px;
+}
+
+.card-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 16px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid #eef0f4;
+}
+
+.title-block {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+    min-width: 0;
+}
+
+.title {
+    font-size: 1.25rem;
+    font-weight: 650;
+    letter-spacing: -0.02em;
+}
+
+.subtitle {
+    font-size: 0.8125rem;
+    color: #6b7280;
+}
+
+.live-pill {
+    flex-shrink: 0;
+    font-size: 0.75rem;
+    font-weight: 600;
+    padding: 6px 10px;
+    border-radius: 999px;
+    background: #f3f4f6;
+    color: #6b7280;
+}
+
+.live-pill.on {
+    background: #ecfdf5;
+    color: #047857;
+}
+
+.live-pill.busy {
+    background: #fff7ed;
+    color: #c2410c;
+}
+
+.chat-scroll {
+    height: min(42vh, 320px);
+    min-height: 200px;
     overflow-y: auto;
+    padding: 4px 2px 8px;
+    scrollbar-width: thin;
+    scrollbar-color: #cbd5e1 transparent;
 }
 
-.user {
-    text-align: right;
-    color: blue;
+.chat-scroll::-webkit-scrollbar {
+    width: 6px;
 }
 
-.assistant {
-    text-align: left;
-    color: green;
+.chat-scroll::-webkit-scrollbar-thumb {
+    background: #cbd5e1;
+    border-radius: 999px;
 }
 
-.controls {
-    margin-top: 10px;
+.chat-empty {
+    font-size: 0.875rem;
+    color: #9ca3af;
+    text-align: center;
+    padding: 48px 16px;
+    line-height: 1.5;
 }
 
-.controls button:disabled {
-    opacity: 0.5;
+.row {
+    display: flex;
+    margin-bottom: 10px;
+}
+
+.row.user {
+    justify-content: flex-end;
+}
+
+.row.assistant {
+    justify-content: flex-start;
+}
+
+.bubble {
+    max-width: 88%;
+    padding: 10px 14px;
+    border-radius: 16px;
+    font-size: 0.9375rem;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.row.user .bubble {
+    background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
+    color: #fff;
+    border-bottom-right-radius: 6px;
+}
+
+.row.assistant .bubble {
+    background: #f3f4f6;
+    color: #111827;
+    border-bottom-left-radius: 6px;
+}
+
+.thinking-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 12px 0 4px;
+    padding: 10px 14px;
+    border-radius: 12px;
+    background: linear-gradient(90deg, #fffbeb 0%, #fef3c7 100%);
+    border: 1px solid #fde68a;
+    color: #92400e;
+    font-size: 0.875rem;
+    font-weight: 500;
+}
+
+.thinking-spinner {
+    width: 16px;
+    height: 16px;
+    border: 2px solid #fcd34d;
+    border-top-color: #d97706;
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+}
+
+.thinking-text {
+    letter-spacing: 0.02em;
+}
+
+@keyframes spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+.fade-enter-active,
+.fade-leave-active {
+    transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.fade-enter-from,
+.fade-leave-to {
+    opacity: 0;
+    transform: translateY(-4px);
+}
+
+.live-caption {
+    margin-top: 12px;
+    padding: 10px 12px;
+    border-radius: 12px;
+    background: #f9fafb;
+    border: 1px solid #eef0f4;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.live-label {
+    font-size: 0.6875rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #9ca3af;
+}
+
+.live-value {
+    font-size: 0.875rem;
+    color: #374151;
+    line-height: 1.45;
+    min-height: 1.45em;
+}
+
+.actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-top: 16px;
+}
+
+.btn {
+    appearance: none;
+    border: none;
+    cursor: pointer;
+    font-size: 0.9375rem;
+    font-weight: 600;
+    padding: 10px 18px;
+    border-radius: 12px;
+    transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease,
+        transform 0.1s ease;
+}
+
+.btn:active:not(:disabled) {
+    transform: scale(0.98);
+}
+
+.btn.primary {
+    background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
+    color: #fff;
+    box-shadow: 0 4px 14px rgba(37, 99, 235, 0.35);
+}
+
+.btn.primary:hover:not(:disabled) {
+    box-shadow: 0 6px 18px rgba(37, 99, 235, 0.42);
+}
+
+.btn.ghost {
+    background: #fff;
+    color: #374151;
+    border: 1px solid #e5e7eb;
+}
+
+.btn.ghost:hover:not(:disabled) {
+    background: #f9fafb;
+    border-color: #d1d5db;
+}
+
+.btn:disabled {
+    opacity: 0.45;
     cursor: not-allowed;
+    box-shadow: none;
 }
 
-.status {
-    color: #555;
-    font-size: 14px;
-    margin-top: 8px;
+.status-line {
+    margin: 14px 0 0;
+    font-size: 0.8125rem;
+    color: #6b7280;
+    line-height: 1.5;
 }
 
 .hint {
-    color: #888;
-    font-size: 13px;
-    margin-top: 6px;
+    margin: 8px 0 0;
+    font-size: 0.75rem;
+    color: #9ca3af;
+    line-height: 1.55;
 }
 </style>
