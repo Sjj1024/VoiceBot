@@ -27,7 +27,12 @@
                 </span>
             </header>
 
-            <div class="chat-scroll" role="log" aria-live="polite">
+            <div
+                ref="chatScrollEl"
+                class="chat-scroll"
+                role="log"
+                aria-live="polite"
+            >
                 <div
                     v-if="messages.length === 0 && !userText"
                     class="chat-empty"
@@ -47,9 +52,28 @@
             <transition name="fade">
                 <div v-if="isThinking" class="thinking-bar" role="status">
                     <span class="thinking-spinner" aria-hidden="true" />
-                    <span class="thinking-text">请等待思考完毕</span>
+                    <span class="thinking-text">请等待思考完毕...</span>
                 </div>
             </transition>
+
+            <div class="composer">
+                <textarea
+                    v-model="typedText"
+                    class="composer-input"
+                    rows="2"
+                    placeholder="输入文字，按 Enter 发送，Shift+Enter 换行"
+                    :disabled="isProcessing || isThinking"
+                    @keydown.enter.exact.prevent="sendTypedMessage"
+                />
+                <button
+                    type="button"
+                    class="btn primary composer-send"
+                    :disabled="!typedText.trim() || isProcessing || isThinking"
+                    @click="sendTypedMessage"
+                >
+                    发送
+                </button>
+            </div>
 
             <div class="live-caption">
                 <span class="live-label">当前识别</span>
@@ -77,16 +101,32 @@
 
             <p class="status-line">{{ status }}</p>
             <p class="hint">
-                持续识别语音；说完稍停顿即自动请求回复。播报时麦克风会暂时关闭，播完后继续听。
+                持续识别语音；说完稍停顿即自动请求回复。本会话内历史会作为上下文发给模型。播报时麦克风会暂时关闭，播完后继续听。
             </p>
         </main>
     </div>
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
 
 const messages = ref([])
+const chatScrollEl = ref(null)
+const typedText = ref('')
+
+const scrollChatToBottom = () => {
+    const el = chatScrollEl.value
+    if (!el) return
+    el.scrollTop = el.scrollHeight
+}
+
+watch(
+    messages,
+    () => {
+        scrollChatToBottom()
+    },
+    { deep: true, flush: 'post' }
+)
 const userText = ref('')
 const status = ref('就绪：请用 Chrome / Edge 打开，并允许麦克风权限')
 const isConversing = ref(false)
@@ -100,6 +140,28 @@ const openclawModel = (import.meta.env.VITE_OPENCLAW_MODEL || '').trim()
 
 /** 停顿超过该时间（毫秒）认为一句说完，触发自动回复 */
 const silenceMs = 1450
+
+/** 发给接口的 user/assistant 条数上限，避免上下文过长 */
+const MAX_CONTEXT_MESSAGES = 48
+
+const SYSTEM_PROMPT =
+    '回答请使用纯文本：不要输出任何表情符号、emoji、绘文字或颜文字；不要使用特殊装饰性符号；标点仅用中文常用标点。请结合此前对话连贯作答。'
+
+/** 从界面消息列表截取可传给 Chat Completions 的历史（去掉非法首条等） */
+const clipHistoryForApi = (list) => {
+    const allowed = list.filter(
+        (m) =>
+            (m.role === 'user' || m.role === 'assistant') &&
+            typeof m.content === 'string' &&
+            m.content.trim() !== ''
+    )
+    let slice =
+        allowed.length > MAX_CONTEXT_MESSAGES
+            ? allowed.slice(-MAX_CONTEXT_MESSAGES)
+            : allowed
+    while (slice.length && slice[0].role === 'assistant') slice.shift()
+    return slice.map((m) => ({ role: m.role, content: m.content.trim() }))
+}
 
 let userRequestedStop = false
 let accFinal = ''
@@ -162,7 +224,7 @@ const finishUserUtterance = async (text) => {
     status.value = '请等待思考完毕…'
     let rawReply
     try {
-        rawReply = await callOpenClaw(trimmed)
+        rawReply = await callOpenClaw(messages.value)
     } catch (e) {
         console.error(e)
         status.value = `回复失败：${e.message}`
@@ -180,6 +242,39 @@ const finishUserUtterance = async (text) => {
 
     status.value = '正在播报回复…'
     await speakAndWait(reply)
+}
+
+const sendTypedMessage = async () => {
+    const text = typedText.value.trim()
+    if (!text) return
+    if (isProcessing.value || isThinking.value) return
+
+    const shouldResumeRecognition = isConversing.value && !!recognition
+    typedText.value = ''
+    clearSilenceTimer()
+    userText.value = ''
+
+    isProcessing.value = true
+    try {
+        if (shouldResumeRecognition) {
+            try {
+                recognition.abort()
+            } catch (e) {
+                console.error(e)
+            }
+        }
+        await finishUserUtterance(text)
+    } finally {
+        isProcessing.value = false
+        if (
+            shouldResumeRecognition &&
+            isConversing.value &&
+            !userRequestedStop
+        ) {
+            status.value = '回复结束，继续聆听中…'
+            tryStartRecognition()
+        }
+    }
 }
 
 const tryStartRecognition = () => {
@@ -361,8 +456,13 @@ const stopConversation = () => {
     status.value = '已结束对话'
 }
 
-// 调用 AI（你可以换成 DeepSeek）
-const callOpenClaw = async (text) => {
+// 调用 AI：conversationMessages 为当前完整多轮（含本轮 user），含记忆上下文
+const callOpenClaw = async (conversationMessages) => {
+    const history = clipHistoryForApi(conversationMessages)
+    if (history.length === 0) {
+        throw new Error('没有可发送的对话内容')
+    }
+
     const base = openclawBase || '/openclaw-api'
     const url = `${base.replace(/\/+$/, '')}/v1/chat/completions`
 
@@ -374,14 +474,7 @@ const callOpenClaw = async (text) => {
         headers,
         body: JSON.stringify({
             model: openclawModel || 'openclaw/default',
-            messages: [
-                {
-                    role: 'system',
-                    content:
-                        '回答请使用纯文本：不要输出任何表情符号、emoji、绘文字或颜文字；不要使用特殊装饰性符号；标点仅用中文常用标点。',
-                },
-                { role: 'user', content: text },
-            ],
+            messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...history],
         }),
     })
 
@@ -571,6 +664,43 @@ const callOpenClaw = async (text) => {
 
 .thinking-text {
     letter-spacing: 0.02em;
+}
+
+.composer {
+    margin-top: 12px;
+    display: flex;
+    gap: 10px;
+    align-items: stretch;
+}
+
+.composer-input {
+    flex: 1;
+    resize: none;
+    border-radius: 12px;
+    border: 1px solid #e5e7eb;
+    background: #fff;
+    padding: 10px 12px;
+    font-size: 0.9375rem;
+    line-height: 1.45;
+    outline: none;
+    color: #000;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.composer-input:focus {
+    border-color: rgba(37, 99, 235, 0.55);
+    box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.12);
+}
+
+.composer-input:disabled {
+    background: #f9fafb;
+    color: #9ca3af;
+}
+
+.composer-send {
+    padding-left: 16px;
+    padding-right: 16px;
+    white-space: nowrap;
 }
 
 @keyframes spin {
