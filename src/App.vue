@@ -529,6 +529,7 @@ const callOpenClaw = async (text) => {
     border-radius: 16px;
     font-size: 0.9375rem;
     line-height: 1.55;
+    text-align: left;
     white-space: pre-wrap;
     word-break: break-word;
 }
