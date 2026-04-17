@@ -87,7 +87,7 @@
                     :disabled="isConversing"
                     @click="startConversation"
                 >
-                    开始对话
+                    语音对话
                 </button>
                 <button
                     type="button"
