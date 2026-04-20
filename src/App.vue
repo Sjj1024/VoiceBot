@@ -108,7 +108,7 @@
 </template>
 
 <script setup>
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 
 const messages = ref([])
 const chatScrollEl = ref(null)
@@ -137,6 +137,10 @@ const isThinking = ref(false)
 const openclawBase = (import.meta.env.VITE_OPENCLAW_URL || '').trim()
 const openclawApiKey = (import.meta.env.VITE_OPENCLAW_API_KEY || '').trim()
 const openclawModel = (import.meta.env.VITE_OPENCLAW_MODEL || '').trim()
+const ttsBase = (import.meta.env.VITE_TTS_URL || '').trim()
+const ttsVoice = (import.meta.env.VITE_TTS_VOICE || 'Cherry').trim() || 'Cherry'
+const whisperBase = (import.meta.env.VITE_WHISPER_URL || '').trim()
+const useWhisperAsr = computed(() => Boolean(whisperBase))
 
 /** 停顿超过该时间（毫秒）认为一句说完，触发自动回复 */
 const silenceMs = 1450
@@ -170,6 +174,19 @@ let silenceTimer = null
 /** 已调用 recognition.stop()，等待 onend 里收尾并走回复流程 */
 let pendingSilenceCommit = false
 
+/** Whisper 路径：麦克风与电平检测（免 VPN） */
+let whisperStream = null
+let whisperAudioCtx = null
+let whisperAnalyser = null
+let whisperDataArray = null
+let whisperRaf = 0
+let whisperMediaRecorder = null
+let whisperChunks = []
+let whisperLastVoiceAt = 0
+let whisperHadVoice = false
+/** 低于该 RMS 视为静音（可按环境微调） */
+const WHISPER_VOICE_RMS = 0.038
+
 /** 去掉 AI 回复中的 emoji / 绘文字（便于朗读与展示） */
 const stripEmojis = (s) =>
     s
@@ -189,6 +206,8 @@ const clearSilenceTimer = () => {
 const scheduleSilenceCommit = () => {
     clearSilenceTimer()
     if (!isConversing.value || isProcessing.value) return
+    // Whisper 模式下不走 Web Speech 的 stop/commit
+    if (useWhisperAsr.value) return
     silenceTimer = window.setTimeout(() => {
         silenceTimer = null
         if (!isConversing.value || isProcessing.value) return
@@ -206,14 +225,67 @@ const scheduleSilenceCommit = () => {
 }
 
 /** 播报结束（或失败）后再 resolve，便于接上下一轮识别 */
-const speakAndWait = (text) =>
+const playAudioUrlAndWait = (url) =>
     new Promise((resolve) => {
+        const audio = new Audio(url)
+        audio.onended = () => resolve()
+        audio.onerror = () => resolve()
+        // 某些浏览器需要先 play() 后才会触发加载
+        void audio.play().catch(() => resolve())
+    })
+
+const speakAndWait = async (text) => {
+    // 优先：DashScope TTS（更自然）。失败则回退浏览器本地朗读。
+    const base = ttsBase || '/speech-api'
+    try {
+        const res = await fetch(`${base.replace(/\/+$/, '')}/tts`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                text,
+                voice: ttsVoice,
+                language_type: 'Chinese',
+            }),
+        })
+        if (!res.ok) throw new Error(`TTS HTTP ${res.status}`)
+        const data = await res.json()
+        const url = data?.url
+        if (typeof url !== 'string' || !url) throw new Error('TTS 缺少 url')
+        window.speechSynthesis.cancel()
+        await playAudioUrlAndWait(url)
+        return
+    } catch (e) {
+        console.warn('DashScope TTS failed, fallback to SpeechSynthesis:', e)
+    }
+
+    await new Promise((resolve) => {
         const utterance = new SpeechSynthesisUtterance(text)
         utterance.lang = 'zh-CN'
+        utterance.rate = 1.0
+        utterance.pitch = 1.0
         utterance.onend = () => resolve()
         utterance.onerror = () => resolve()
         window.speechSynthesis.speak(utterance)
     })
+}
+
+const transcribeWithWhisperServer = async (blob) => {
+    const base = whisperBase.replace(/\/$/, '')
+    const form = new FormData()
+    form.append('audio', blob, 'utterance.webm')
+    const res = await fetch(`${base}/transcribe`, {
+        method: 'POST',
+        body: form,
+    })
+    const raw = await res.text()
+    if (!res.ok) throw new Error(raw || `HTTP ${res.status}`)
+    try {
+        const data = JSON.parse(raw)
+        return (data.text || '').trim()
+    } catch {
+        return ''
+    }
+}
 
 const finishUserUtterance = async (text) => {
     const trimmed = text.trim()
@@ -244,18 +316,206 @@ const finishUserUtterance = async (text) => {
     await speakAndWait(reply)
 }
 
+const stopWhisperPipeline = () => {
+    if (whisperRaf) {
+        cancelAnimationFrame(whisperRaf)
+        whisperRaf = 0
+    }
+    try {
+        if (whisperMediaRecorder && whisperMediaRecorder.state !== 'inactive') {
+            whisperMediaRecorder.stop()
+        }
+    } catch {
+        /* ignore */
+    }
+    whisperMediaRecorder = null
+    whisperChunks = []
+    if (whisperStream) {
+        whisperStream.getTracks().forEach((t) => t.stop())
+        whisperStream = null
+    }
+    if (whisperAudioCtx) {
+        whisperAudioCtx.close().catch(() => {})
+        whisperAudioCtx = null
+    }
+    whisperAnalyser = null
+    whisperDataArray = null
+    whisperHadVoice = false
+    whisperLastVoiceAt = 0
+}
+
+const pickRecorderMime = () => {
+    const c = 'audio/webm;codecs=opus'
+    if (
+        typeof MediaRecorder !== 'undefined' &&
+        MediaRecorder.isTypeSupported?.(c)
+    )
+        return c
+    if (
+        typeof MediaRecorder !== 'undefined' &&
+        MediaRecorder.isTypeSupported?.('audio/webm')
+    )
+        return 'audio/webm'
+    return ''
+}
+
+const startWhisperMediaSegment = () => {
+    if (!whisperStream || !isConversing.value || userRequestedStop) return
+    const mime = pickRecorderMime()
+    whisperChunks = []
+    whisperMediaRecorder = mime
+        ? new MediaRecorder(whisperStream, { mimeType: mime })
+        : new MediaRecorder(whisperStream)
+    whisperMediaRecorder.ondataavailable = (e) => {
+        if (e.data?.size) whisperChunks.push(e.data)
+    }
+    whisperMediaRecorder.start(400)
+}
+
+const commitWhisperTurn = async () => {
+    if (!isConversing.value || userRequestedStop) return
+    if (!whisperMediaRecorder || whisperMediaRecorder.state !== 'recording')
+        return
+
+    isProcessing.value = true
+    try {
+        await new Promise((resolve, reject) => {
+            whisperMediaRecorder.onstop = () => resolve()
+            whisperMediaRecorder.onerror = () =>
+                reject(new Error('MediaRecorder error'))
+            whisperMediaRecorder.stop()
+        })
+    } catch (e) {
+        isProcessing.value = false
+        console.error(e)
+        status.value = '录音结束失败，请重试'
+        if (isConversing.value && !userRequestedStop) startWhisperMediaSegment()
+        return
+    }
+
+    const blob = new Blob(whisperChunks, {
+        type: whisperMediaRecorder.mimeType || 'audio/webm',
+    })
+    whisperChunks = []
+
+    if (blob.size < 1800) {
+        isProcessing.value = false
+        if (isConversing.value && !userRequestedStop) {
+            startWhisperMediaSegment()
+            status.value = '片段太短，已丢弃，请继续说话'
+        }
+        return
+    }
+
+    try {
+        status.value = '正在转写（Whisper）…'
+        const text = (await transcribeWithWhisperServer(blob)).trim()
+        userText.value = text
+        if (text) await finishUserUtterance(text)
+        else status.value = '未识别到有效文字，请再说一次'
+    } catch (e) {
+        console.error(e)
+        status.value = `转写失败：${e.message || e}`
+    } finally {
+        isProcessing.value = false
+        if (isConversing.value && !userRequestedStop) {
+            startWhisperMediaSegment()
+            status.value = '继续聆听中…'
+        }
+    }
+}
+
+const whisperSilenceLoop = () => {
+    if (!useWhisperAsr.value || !isConversing.value || userRequestedStop) {
+        whisperRaf = 0
+        return
+    }
+    if (!whisperAnalyser || !whisperDataArray) {
+        whisperRaf = requestAnimationFrame(whisperSilenceLoop)
+        return
+    }
+
+    if (!isProcessing.value) {
+        whisperAnalyser.getByteTimeDomainData(whisperDataArray)
+        const n = whisperDataArray.length
+        let sum = 0
+        for (let i = 0; i < n; i++) {
+            const x = (whisperDataArray[i] - 128) / 128
+            sum += x * x
+        }
+        const rms = Math.sqrt(sum / n)
+        if (rms > WHISPER_VOICE_RMS) {
+            whisperLastVoiceAt = Date.now()
+            whisperHadVoice = true
+        }
+        if (
+            whisperHadVoice &&
+            Date.now() - whisperLastVoiceAt >= silenceMs &&
+            whisperMediaRecorder &&
+            whisperMediaRecorder.state === 'recording'
+        ) {
+            whisperHadVoice = false
+            void commitWhisperTurn()
+        }
+    }
+
+    whisperRaf = requestAnimationFrame(whisperSilenceLoop)
+}
+
+const startWhisperConversation = async () => {
+    stopWhisperPipeline()
+    try {
+        whisperStream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+                echoCancellation: true,
+                noiseSuppression: true,
+            },
+            video: false,
+        })
+    } catch (e) {
+        status.value = `无法打开麦克风：${e.message || e}`
+        console.error(e)
+        return
+    }
+
+    whisperAudioCtx = new AudioContext()
+    const source = whisperAudioCtx.createMediaStreamSource(whisperStream)
+    whisperAnalyser = whisperAudioCtx.createAnalyser()
+    whisperAnalyser.fftSize = 1024
+    whisperAnalyser.smoothingTimeConstant = 0.35
+    source.connect(whisperAnalyser)
+    whisperDataArray = new Uint8Array(whisperAnalyser.fftSize)
+
+    isConversing.value = true
+    userRequestedStop = false
+    isProcessing.value = false
+    pendingSilenceCommit = false
+    userText.value = ''
+    whisperHadVoice = false
+    whisperLastVoiceAt = 0
+    clearSilenceTimer()
+    window.speechSynthesis.cancel()
+
+    startWhisperMediaSegment()
+    whisperRaf = requestAnimationFrame(whisperSilenceLoop)
+    status.value = '对话已开始（Whisper）：说完一句请稍停顿'
+}
+
 const sendTypedMessage = async () => {
     const text = typedText.value.trim()
     if (!text) return
     if (isProcessing.value || isThinking.value) return
 
-    const shouldResumeRecognition = isConversing.value && !!recognition
+    const shouldResumeRecognition =
+        isConversing.value && !!recognition && !useWhisperAsr.value
+    const shouldResumeWhisper = isConversing.value && useWhisperAsr.value
     typedText.value = ''
     clearSilenceTimer()
     userText.value = ''
 
     isProcessing.value = true
     try {
+        if (shouldResumeWhisper) stopWhisperPipeline()
         if (shouldResumeRecognition) {
             try {
                 recognition.abort()
@@ -266,6 +526,10 @@ const sendTypedMessage = async () => {
         await finishUserUtterance(text)
     } finally {
         isProcessing.value = false
+        if (shouldResumeWhisper && isConversing.value && !userRequestedStop) {
+            void startWhisperConversation()
+            return
+        }
         if (
             shouldResumeRecognition &&
             isConversing.value &&
@@ -339,6 +603,7 @@ const initSpeech = () => {
     }
 
     recognition.onerror = (event) => {
+        console.log('recognition.onerror', event)
         if (event.error === 'aborted') return
         const map = {
             not_allowed: '麦克风被拒绝：请在地址栏允许麦克风',
@@ -398,6 +663,7 @@ const initSpeech = () => {
     }
 
     recognition.onresult = (event) => {
+        console.log('recognition.onresult', event)
         if (!isConversing.value || isProcessing.value) return
 
         let finalChunk = ''
@@ -416,6 +682,10 @@ const initSpeech = () => {
 }
 
 const startConversation = () => {
+    if (useWhisperAsr.value) {
+        void startWhisperConversation()
+        return
+    }
     if (!recognition) {
         if (initSpeech() === false) return
     }
@@ -441,13 +711,17 @@ const startConversation = () => {
 }
 
 const stopConversation = () => {
-    if (!recognition) return
     userRequestedStop = true
     isConversing.value = false
     clearSilenceTimer()
     pendingSilenceCommit = false
     isProcessing.value = false
     window.speechSynthesis.cancel()
+    stopWhisperPipeline()
+    if (!recognition) {
+        status.value = '已结束对话'
+        return
+    }
     try {
         recognition.abort()
     } catch (e) {
