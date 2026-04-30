@@ -163,7 +163,9 @@ app.post('/transcribe', upload.single('audio'), async (req, res) => {
                     else
                         reject(
                             new Error(
-                                `whisper 退出码 ${code}。\n${stderr.slice(-1200)}`
+                                `whisper 退出码 ${code}。\n${stderr.slice(
+                                    -1200
+                                )}`
                             )
                         )
                 })
