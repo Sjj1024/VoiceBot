@@ -28,3 +28,6 @@ dist-ssr
 
 # Python venv (QwenOmni realtime demo)
 QwenOmni/.venv
+
+.env
+.venv
