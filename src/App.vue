@@ -68,6 +68,14 @@
                         </span>
                         <span class="tts-progress-detail">{{ ttsHint }}</span>
                     </div>
+                    <button
+                        v-if="canStopTtsPlayback"
+                        type="button"
+                        class="btn-stop-tts"
+                        @click="stopTtsPlayback"
+                    >
+                        停止播报
+                    </button>
                 </div>
             </transition>
 
@@ -380,14 +388,55 @@ const scheduleSilenceCommit = () => {
     }, silenceMs)
 }
 
-/** 播报结束（或失败）后再 resolve，便于接上下一轮识别 */
+/** 当前 HTTP 播报的 Audio，便于用户点击「停止播报」时 pause */
+const activeTtsAudio = ref(null)
+/** 正在真正出声时可停止（合成阶段为 false） */
+const canStopTtsPlayback = ref(false)
+let ttsPlayPromiseResolver = null
+
+/** 打断当前 TTS 播放（不修改 status，供结束对话等场景复用） */
+const abortActiveTtsPlayback = () => {
+    window.speechSynthesis.cancel()
+    const a = activeTtsAudio.value
+    if (a) {
+        a.onended = null
+        a.onerror = null
+        try {
+            a.pause()
+            a.src = ''
+        } catch {
+            /* ignore */
+        }
+        activeTtsAudio.value = null
+    }
+    const r = ttsPlayPromiseResolver
+    ttsPlayPromiseResolver = null
+    canStopTtsPlayback.value = false
+    if (r) r()
+}
+
+const stopTtsPlayback = () => {
+    abortActiveTtsPlayback()
+    status.value = '已停止播报'
+}
+
+/** 播报结束（或失败、或用户停止）后再 resolve，便于接上下一轮识别 */
 const playAudioUrlAndWait = (url) =>
     new Promise((resolve) => {
+        ttsPlayPromiseResolver = resolve
         const audio = new Audio(url)
-        audio.onended = () => resolve()
-        audio.onerror = () => resolve()
-        // 某些浏览器需要先 play() 后才会触发加载
-        void audio.play().catch(() => resolve())
+        activeTtsAudio.value = audio
+        canStopTtsPlayback.value = true
+        const done = () => {
+            if (ttsPlayPromiseResolver !== resolve) return
+            ttsPlayPromiseResolver = null
+            activeTtsAudio.value = null
+            canStopTtsPlayback.value = false
+            resolve()
+        }
+        audio.onended = done
+        audio.onerror = done
+        void audio.play().catch(() => done())
     })
 
 /** 兼容百炼式 JSON：output.audio.url；旧版仅返回顶层 url */
@@ -422,16 +471,24 @@ const fetchTtsAudioUrl = async (text) => {
     return url
 }
 
-/** 浏览器 SpeechSynthesis 朗读至结束 */
+/** 浏览器 SpeechSynthesis 朗读至结束（可 stopTtsPlayback 打断） */
 const speakBrowserTtsAndWait = (text) =>
     new Promise((resolve) => {
-        window.speechSynthesis.cancel()
+        abortActiveTtsPlayback()
+        ttsPlayPromiseResolver = resolve
+        canStopTtsPlayback.value = true
         const utterance = new SpeechSynthesisUtterance(text)
         utterance.lang = 'zh-CN'
         utterance.rate = 1.0
         utterance.pitch = 1.0
-        utterance.onend = () => resolve()
-        utterance.onerror = () => resolve()
+        const done = () => {
+            if (ttsPlayPromiseResolver !== resolve) return
+            ttsPlayPromiseResolver = null
+            canStopTtsPlayback.value = false
+            resolve()
+        }
+        utterance.onend = done
+        utterance.onerror = done
         window.speechSynthesis.speak(utterance)
     })
 
@@ -445,7 +502,7 @@ const revealAssistantTextThenPlayUrl = async (reply, url) => {
         requestAnimationFrame(() => requestAnimationFrame(r))
     )
     status.value = '正在播报回复…'
-    window.speechSynthesis.cancel()
+    abortActiveTtsPlayback()
     await playAudioUrlAndWait(url)
 }
 
@@ -722,7 +779,7 @@ const startWhisperConversation = async () => {
     whisperHadVoice = false
     whisperLastVoiceAt = 0
     clearSilenceTimer()
-    window.speechSynthesis.cancel()
+    abortActiveTtsPlayback()
 
     startWhisperMediaSegment()
     whisperRaf = requestAnimationFrame(whisperSilenceLoop)
@@ -737,7 +794,6 @@ const sendTypedMessage = async () => {
     const shouldResumeRecognition =
         isConversing.value && !!recognition && !useWhisperAsr.value
     const shouldResumeWhisper = isConversing.value && useWhisperAsr.value
-    typedText.value = ''
     clearSilenceTimer()
     userText.value = ''
 
@@ -753,6 +809,7 @@ const sendTypedMessage = async () => {
         }
         await finishUserUtterance(text)
     } finally {
+        typedText.value = ''
         isProcessing.value = false
         if (shouldResumeWhisper && isConversing.value && !userRequestedStop) {
             void startWhisperConversation()
@@ -924,7 +981,7 @@ const startConversation = () => {
     accFinal = ''
     userText.value = ''
     clearSilenceTimer()
-    window.speechSynthesis.cancel()
+    abortActiveTtsPlayback()
     try {
         recognition.start()
         status.value = '对话已开始：停顿约 1.5 秒视为一句说完'
@@ -944,7 +1001,7 @@ const stopConversation = () => {
     clearSilenceTimer()
     pendingSilenceCommit = false
     isProcessing.value = false
-    window.speechSynthesis.cancel()
+    abortActiveTtsPlayback()
     stopWhisperPipeline()
     if (!recognition) {
         status.value = '已结束对话'
@@ -1170,7 +1227,7 @@ const callOpenClaw = async (conversationMessages) => {
 
 .tts-progress-bar {
     display: flex;
-    align-items: flex-start;
+    align-items: center;
     gap: 12px;
     margin: 10px 0 4px;
     padding: 12px 14px;
@@ -1181,11 +1238,29 @@ const callOpenClaw = async (conversationMessages) => {
     font-size: 0.875rem;
 }
 
+.btn-stop-tts {
+    flex-shrink: 0;
+    cursor: pointer;
+    border: 1px solid #0284c7;
+    background: #fff;
+    color: #0369a1;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    padding: 8px 12px;
+    border-radius: 10px;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+
+.btn-stop-tts:hover {
+    background: #f0f9ff;
+    color: #0c4a6e;
+}
+
 .tts-spinner {
     border-color: #bae6fd;
     border-top-color: #0284c7;
     flex-shrink: 0;
-    margin-top: 2px;
+    align-self: center;
 }
 
 .tts-progress-body {
@@ -1193,6 +1268,8 @@ const callOpenClaw = async (conversationMessages) => {
     flex-direction: column;
     gap: 4px;
     min-width: 0;
+    flex: 1;
+    align-self: center;
 }
 
 .tts-progress-title {
