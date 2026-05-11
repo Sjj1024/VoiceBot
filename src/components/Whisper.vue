@@ -1,6 +1,6 @@
 <template>
     <div class="container">
-        <h2>🎤 AI语音助手</h2>
+        <h2>🎤 AI小龙虾语音助手</h2>
 
         <div class="chat-box">
             <div v-for="(msg, i) in messages" :key="i" :class="msg.role">

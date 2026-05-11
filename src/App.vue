@@ -3,7 +3,7 @@
         <main class="card">
             <header class="card-head">
                 <div class="title-block">
-                    <span class="title">语音助手</span>
+                    <span class="title">小龙虾语音助手</span>
                     <span class="subtitle">
                         停顿约 {{ silenceMs }}ms 视为一句说完
                     </span>
@@ -11,19 +11,15 @@
                 <span
                     class="live-pill"
                     :class="{
-                        on: isConversing && !isProcessing,
-                        busy: isProcessing,
+                        on:
+                            isConversing &&
+                            !isProcessing &&
+                            !isThinking &&
+                            !ttsPhase,
+                        busy: isProcessing || isThinking || ttsPhase,
                     }"
                 >
-                    {{
-                        isThinking
-                            ? '思考中'
-                            : isProcessing
-                            ? '处理中'
-                            : isConversing
-                            ? '聆听中'
-                            : '未开始'
-                    }}
+                    {{ headerPillLabel }}
                 </span>
             </header>
 
@@ -56,19 +52,41 @@
                 </div>
             </transition>
 
+            <transition name="fade">
+                <div v-if="ttsPhase" class="tts-progress-bar" role="status">
+                    <span
+                        class="thinking-spinner tts-spinner"
+                        aria-hidden="true"
+                    />
+                    <div class="tts-progress-body">
+                        <span class="tts-progress-title">{{
+                            ttsPhase === 'synthesizing'
+                                ? '正在合成语音'
+                                : '正在播报回复'
+                        }}</span>
+                        <span class="tts-progress-detail">{{ ttsHint }}</span>
+                    </div>
+                </div>
+            </transition>
+
             <div class="composer">
                 <textarea
                     v-model="typedText"
                     class="composer-input"
                     rows="2"
                     placeholder="输入文字，按 Enter 发送，Shift+Enter 换行"
-                    :disabled="isProcessing || isThinking"
+                    :disabled="isProcessing || isThinking || ttsPhase"
                     @keydown.enter.exact.prevent="sendTypedMessage"
                 />
                 <button
                     type="button"
                     class="btn primary composer-send"
-                    :disabled="!typedText.trim() || isProcessing || isThinking"
+                    :disabled="
+                        !typedText.trim() ||
+                        isProcessing ||
+                        isThinking ||
+                        ttsPhase
+                    "
                     @click="sendTypedMessage"
                 >
                     发送
@@ -155,7 +173,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 
 const messages = ref([])
 const chatScrollEl = ref(null)
@@ -180,6 +198,19 @@ const isConversing = ref(false)
 const isProcessing = ref(false)
 /** 正在等待模型 HTTP 返回（区别于播报阶段的 isProcessing） */
 const isThinking = ref(false)
+/** TTS：null | synthesizing（请求接口） | playing（含浏览器朗读） */
+const ttsPhase = ref(null)
+/** 与 tts-progress-bar 配套的说明文案 */
+const ttsHint = ref('')
+
+const headerPillLabel = computed(() => {
+    if (isThinking.value) return '思考中'
+    if (ttsPhase.value === 'synthesizing') return '合成语音'
+    if (ttsPhase.value === 'playing') return '播报中'
+    if (isProcessing.value) return '处理中'
+    if (isConversing.value) return '聆听中'
+    return '未开始'
+})
 
 const openclawBase = (import.meta.env.VITE_OPENCLAW_URL || '').trim()
 const openclawApiKey = (import.meta.env.VITE_OPENCLAW_API_KEY || '').trim()
@@ -367,36 +398,32 @@ const ttsAudioUrlFromResponse = (data) => {
     return ''
 }
 
-const speakAndWait = async (text) => {
-    // 优先：HTTP TTS（返回可播放 url）。失败则回退浏览器本地朗读。
+/** 请求 TTS，返回可播放音频 URL（不插入消息、不播放） */
+const fetchTtsAudioUrl = async (text) => {
     const base = ttsBase || '/speech-api'
-    try {
-        const res = await fetch(`${base.replace(/\/+$/, '')}/tts`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                text,
-                voice: selectedTtsVoice.value,
-                language_type: 'Chinese',
-            }),
-        })
-        if (!res.ok) throw new Error(`TTS HTTP ${res.status}`)
-        const data = await res.json()
-        if (data?.status_code != null && Number(data.status_code) !== 200) {
-            throw new Error(
-                data.message || `TTS status_code ${data.status_code}`
-            )
-        }
-        const url = ttsAudioUrlFromResponse(data)
-        if (!url) throw new Error('TTS 响应缺少可播放 url（output.audio.url）')
-        window.speechSynthesis.cancel()
-        await playAudioUrlAndWait(url)
-        return
-    } catch (e) {
-        console.warn('DashScope TTS failed, fallback to SpeechSynthesis:', e)
+    const res = await fetch(`${base.replace(/\/+$/, '')}/tts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            text,
+            voice: selectedTtsVoice.value,
+            language_type: 'Chinese',
+        }),
+    })
+    if (!res.ok) throw new Error(`TTS HTTP ${res.status}`)
+    const data = await res.json()
+    if (data?.status_code != null && Number(data.status_code) !== 200) {
+        throw new Error(data.message || `TTS status_code ${data.status_code}`)
     }
+    const url = ttsAudioUrlFromResponse(data)
+    if (!url) throw new Error('TTS 响应缺少可播放 url（output.audio.url）')
+    return url
+}
 
-    await new Promise((resolve) => {
+/** 浏览器 SpeechSynthesis 朗读至结束 */
+const speakBrowserTtsAndWait = (text) =>
+    new Promise((resolve) => {
+        window.speechSynthesis.cancel()
         const utterance = new SpeechSynthesisUtterance(text)
         utterance.lang = 'zh-CN'
         utterance.rate = 1.0
@@ -405,6 +432,29 @@ const speakAndWait = async (text) => {
         utterance.onerror = () => resolve()
         window.speechSynthesis.speak(utterance)
     })
+
+/**
+ * 先插入助手文案，等 DOM 更新并过一帧后再开始播放，使文字与声音同时出现。
+ */
+const revealAssistantTextThenPlayUrl = async (reply, url) => {
+    messages.value.push({ role: 'assistant', content: reply })
+    await nextTick()
+    await new Promise((r) =>
+        requestAnimationFrame(() => requestAnimationFrame(r))
+    )
+    status.value = '正在播报回复…'
+    window.speechSynthesis.cancel()
+    await playAudioUrlAndWait(url)
+}
+
+const revealAssistantTextThenSpeakBrowser = async (reply) => {
+    messages.value.push({ role: 'assistant', content: reply })
+    await nextTick()
+    await new Promise((r) =>
+        requestAnimationFrame(() => requestAnimationFrame(r))
+    )
+    status.value = '正在播报回复（浏览器朗读）…'
+    await speakBrowserTtsAndWait(reply)
 }
 
 const transcribeWithWhisperServer = async (blob) => {
@@ -454,10 +504,36 @@ const finishUserUtterance = async (text) => {
     }
 
     const reply = stripEmojis(rawReply)
-    messages.value.push({ role: 'assistant', content: reply })
 
-    status.value = '正在播报回复…'
-    await speakAndWait(reply)
+    try {
+        ttsPhase.value = 'synthesizing'
+        ttsHint.value =
+            '已向 TTS 提交本回复全文，正在生成音频（可能需要数秒，请稍候）…'
+        status.value = ttsHint.value
+
+        let audioUrl = null
+        try {
+            audioUrl = await fetchTtsAudioUrl(reply)
+        } catch (e) {
+            console.warn('HTTP TTS 失败，将使用浏览器朗读:', e)
+            ttsHint.value = '在线语音合成失败，将展示文字并改用浏览器朗读。'
+            status.value = `${ttsHint.value} ${e?.message || e}`
+        }
+
+        ttsPhase.value = 'playing'
+        if (audioUrl) {
+            ttsHint.value = '正在同步显示回复文字并播放合成语音…'
+            status.value = ttsHint.value
+            await revealAssistantTextThenPlayUrl(reply, audioUrl)
+        } else {
+            ttsHint.value = '正在同步显示回复文字并启用浏览器朗读…'
+            status.value = ttsHint.value
+            await revealAssistantTextThenSpeakBrowser(reply)
+        }
+    } finally {
+        ttsPhase.value = null
+        ttsHint.value = ''
+    }
 }
 
 const stopWhisperPipeline = () => {
@@ -1088,6 +1164,45 @@ const callOpenClaw = async (conversationMessages) => {
 
 .thinking-text {
     letter-spacing: 0.02em;
+}
+
+.tts-progress-bar {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    margin: 10px 0 4px;
+    padding: 12px 14px;
+    border-radius: 12px;
+    background: linear-gradient(90deg, #eff6ff 0%, #e0f2fe 100%);
+    border: 1px solid #7dd3fc;
+    color: #0c4a6e;
+    font-size: 0.875rem;
+}
+
+.tts-spinner {
+    border-color: #bae6fd;
+    border-top-color: #0284c7;
+    flex-shrink: 0;
+    margin-top: 2px;
+}
+
+.tts-progress-body {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+}
+
+.tts-progress-title {
+    font-weight: 600;
+    letter-spacing: 0.02em;
+}
+
+.tts-progress-detail {
+    font-size: 0.8125rem;
+    line-height: 1.45;
+    color: #0369a1;
+    opacity: 0.95;
 }
 
 .composer {
