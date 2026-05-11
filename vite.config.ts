@@ -14,7 +14,7 @@ export default defineConfig({
                 rewrite: (path) => path.replace(/^\/openclaw-api/, ''),
             },
             '/speech-api': {
-                target: 'http://127.0.0.1:8787',
+                target: 'http://192.168.31.108:8000',
                 changeOrigin: true,
                 rewrite: (path) => path.replace(/^\/speech-api/, ''),
             },
