@@ -59,11 +59,13 @@
                         aria-hidden="true"
                     />
                     <div class="tts-progress-body">
-                        <span class="tts-progress-title">{{
-                            ttsPhase === 'synthesizing'
-                                ? '正在合成语音'
-                                : '正在播报回复'
-                        }}</span>
+                        <span class="tts-progress-title">
+                            {{
+                                ttsPhase === 'synthesizing'
+                                    ? '正在合成语音'
+                                    : '正在播报回复'
+                            }}
+                        </span>
                         <span class="tts-progress-detail">{{ ttsHint }}</span>
                     </div>
                 </div>
