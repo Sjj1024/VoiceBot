@@ -139,7 +139,16 @@ const openclawApiKey = (import.meta.env.VITE_OPENCLAW_API_KEY || '').trim()
 const openclawModel = (import.meta.env.VITE_OPENCLAW_MODEL || '').trim()
 const ttsBase = (import.meta.env.VITE_TTS_URL || '').trim()
 const ttsVoice = (import.meta.env.VITE_TTS_VOICE || 'Cherry').trim() || 'Cherry'
+/** 语音识别服务根地址；开发环境可配 /speech-api（vite 已代理到局域网转写服务） */
 const whisperBase = (import.meta.env.VITE_WHISPER_URL || '').trim()
+/** multipart 里音频字段名，需与后端一致（常见 audio 或 file） */
+const whisperFormField = (
+    import.meta.env.VITE_WHISPER_FORM_FIELD || 'file'
+).trim()
+/** 转写接口路径，默认 POST /transcribe，返回 {"language":"...","text":"..."} */
+const whisperTranscribePath = (
+    import.meta.env.VITE_WHISPER_TRANSCRIBE_PATH || '/transcribe'
+).trim()
 const useWhisperAsr = computed(() => Boolean(whisperBase))
 
 /** 停顿超过该时间（毫秒）认为一句说完，触发自动回复 */
@@ -271,9 +280,12 @@ const speakAndWait = async (text) => {
 
 const transcribeWithWhisperServer = async (blob) => {
     const base = whisperBase.replace(/\/$/, '')
+    const path = whisperTranscribePath.startsWith('/')
+        ? whisperTranscribePath
+        : `/${whisperTranscribePath}`
     const form = new FormData()
-    form.append('audio', blob, 'utterance.webm')
-    const res = await fetch(`${base}/transcribe`, {
+    form.append(whisperFormField, blob, `${whisperFormField}.webm`)
+    const res = await fetch(`${base}${path}`, {
         method: 'POST',
         body: form,
     })
@@ -281,9 +293,12 @@ const transcribeWithWhisperServer = async (blob) => {
     if (!res.ok) throw new Error(raw || `HTTP ${res.status}`)
     try {
         const data = JSON.parse(raw)
-        return (data.text || '').trim()
+        return {
+            text: (data.text ?? '').trim(),
+            language: (data.language ?? '').trim(),
+        }
     } catch {
-        return ''
+        return { text: '', language: '' }
     }
 }
 
@@ -408,11 +423,17 @@ const commitWhisperTurn = async () => {
     }
 
     try {
-        status.value = '正在转写（Whisper）…'
-        const text = (await transcribeWithWhisperServer(blob)).trim()
+        status.value = '正在转写…'
+        const { text, language } = await transcribeWithWhisperServer(blob)
         userText.value = text
-        if (text) await finishUserUtterance(text)
-        else status.value = '未识别到有效文字，请再说一次'
+        if (text) {
+            if (language) status.value = `转写完成（${language}）`
+            await finishUserUtterance(text)
+        } else {
+            status.value = language
+                ? `未识别到有效文字（${language}），请再说一次`
+                : '未识别到有效文字，请再说一次'
+        }
     } catch (e) {
         console.error(e)
         status.value = `转写失败：${e.message || e}`

@@ -35,6 +35,12 @@
 import { computed, ref } from 'vue'
 
 const whisperBase = (import.meta.env.VITE_WHISPER_URL || '').trim()
+const whisperFormField = (
+    import.meta.env.VITE_WHISPER_FORM_FIELD || 'audio'
+).trim()
+const whisperTranscribePath = (
+    import.meta.env.VITE_WHISPER_TRANSCRIBE_PATH || '/transcribe'
+).trim()
 const useWhisperAsr = Boolean(whisperBase)
 
 const messages = ref([])
@@ -119,9 +125,12 @@ const speakAndWait = (text) =>
 
 const transcribeWithWhisperServer = async (blob) => {
     const base = whisperBase.replace(/\/$/, '')
+    const path = whisperTranscribePath.startsWith('/')
+        ? whisperTranscribePath
+        : `/${whisperTranscribePath}`
     const form = new FormData()
-    form.append('audio', blob, 'utterance.webm')
-    const res = await fetch(`${base}/transcribe`, {
+    form.append(whisperFormField, blob, `${whisperFormField}.webm`)
+    const res = await fetch(`${base}${path}`, {
         method: 'POST',
         body: form,
     })
@@ -131,9 +140,12 @@ const transcribeWithWhisperServer = async (blob) => {
     }
     try {
         const data = JSON.parse(raw)
-        return (data.text || '').trim()
+        return {
+            text: (data.text ?? '').trim(),
+            language: (data.language ?? '').trim(),
+        }
     } catch {
-        return ''
+        return { text: '', language: '' }
     }
 }
 
@@ -300,11 +312,17 @@ const commitWhisperTurn = async () => {
     }
 
     try {
-        status.value = '正在转写（Whisper）…'
-        const text = (await transcribeWithWhisperServer(blob)).trim()
+        status.value = '正在转写…'
+        const { text, language } = await transcribeWithWhisperServer(blob)
         userText.value = text
-        if (text) await finishUserUtterance(text)
-        else status.value = '未识别到有效文字，请再说一次'
+        if (text) {
+            if (language) status.value = `转写完成（${language}）`
+            await finishUserUtterance(text)
+        } else {
+            status.value = language
+                ? `未识别到有效文字（${language}），请再说一次`
+                : '未识别到有效文字，请再说一次'
+        }
     } catch (e) {
         console.error(e)
         status.value = `转写失败：${e.message || e}`
