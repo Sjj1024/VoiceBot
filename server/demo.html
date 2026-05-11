@@ -1,0 +1,684 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>麦克风语音识别演示</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #0b1220;
+        --panel: rgba(255, 255, 255, 0.06);
+        --border: rgba(255, 255, 255, 0.12);
+        --text: rgba(255, 255, 255, 0.92);
+        --muted: rgba(255, 255, 255, 0.7);
+        --accent: #6ea8fe;
+        --danger: #ff6b6b;
+        --ok: #51cf66;
+      }
+      @media (prefers-color-scheme: light) {
+        :root {
+          --bg: #f6f7fb;
+          --panel: rgba(0, 0, 0, 0.04);
+          --border: rgba(0, 0, 0, 0.12);
+          --text: rgba(0, 0, 0, 0.92);
+          --muted: rgba(0, 0, 0, 0.65);
+          --accent: #1c7ed6;
+          --danger: #e03131;
+          --ok: #2f9e44;
+        }
+      }
+      body {
+        margin: 0;
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica,
+          Arial, "Apple Color Emoji", "Segoe UI Emoji";
+        background: radial-gradient(1200px 600px at 20% 0%, rgba(110, 168, 254, 0.25), transparent),
+          radial-gradient(900px 500px at 100% 20%, rgba(81, 207, 102, 0.18), transparent),
+          var(--bg);
+        color: var(--text);
+      }
+      .wrap {
+        max-width: 980px;
+        margin: 0 auto;
+        padding: 28px 18px 46px;
+      }
+      header {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        align-items: baseline;
+        margin-bottom: 18px;
+      }
+      h1 {
+        font-size: 20px;
+        margin: 0;
+        letter-spacing: 0.2px;
+      }
+      .hint {
+        color: var(--muted);
+        font-size: 13px;
+      }
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        padding: 16px;
+        backdrop-filter: blur(10px);
+      }
+      .row {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+        align-items: center;
+      }
+      button {
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 10px 12px;
+        background: transparent;
+        color: var(--text);
+        cursor: pointer;
+        font-weight: 600;
+        letter-spacing: 0.1px;
+      }
+      button.primary {
+        border-color: rgba(110, 168, 254, 0.55);
+        background: rgba(110, 168, 254, 0.15);
+      }
+      button.danger {
+        border-color: rgba(255, 107, 107, 0.6);
+        background: rgba(255, 107, 107, 0.12);
+      }
+      button:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+      }
+      .status {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 10px;
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+      .dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 99px;
+        background: rgba(255, 255, 255, 0.25);
+        border: 1px solid var(--border);
+      }
+      .dot.ok { background: var(--ok); border-color: rgba(0,0,0,0.12); }
+      .dot.rec { background: var(--danger); border-color: rgba(0,0,0,0.12); }
+      .grid {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 12px;
+        margin-top: 12px;
+      }
+      @media (min-width: 900px) {
+        .grid { grid-template-columns: 1.2fr 0.8fr; }
+      }
+      textarea {
+        width: 100%;
+        min-height: 210px;
+        resize: vertical;
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        padding: 12px;
+        background: transparent;
+        color: var(--text);
+        outline: none;
+        font-size: 14px;
+        line-height: 1.55;
+      }
+      .kvs {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 10px;
+      }
+      .kv {
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        padding: 12px;
+      }
+      .kv .k { color: var(--muted); font-size: 12px; }
+      .kv .v { margin-top: 6px; font-weight: 700; font-size: 13px; word-break: break-word; }
+      .small {
+        margin-top: 10px;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.5;
+      }
+      code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+      .err { color: var(--danger); }
+      .subtitle {
+        font-size: 16px;
+        margin: 22px 0 12px;
+        font-weight: 700;
+        letter-spacing: 0.2px;
+      }
+      .audio-full {
+        width: 100%;
+        margin-top: 12px;
+        border-radius: 12px;
+      }
+      .tts-text {
+        min-height: 120px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <header>
+        <h1>语音识别与语音合成演示（/transcribe、/ws/asr、/tts）</h1>
+        <div class="hint">提示：首次需要授权麦克风；建议 Chrome / Edge。</div>
+      </header>
+
+      <div class="panel">
+        <div class="row">
+          <button id="btnInit" class="primary">授权麦克风</button>
+          <button id="btnLive" class="primary" disabled>实时识别</button>
+          <button id="btnLiveStop" class="danger" disabled>停止实时</button>
+          <button id="btnStart" class="primary" disabled>开始录音</button>
+          <button id="btnStop" class="danger" disabled>停止并识别</button>
+          <button id="btnClear">清空</button>
+          <span class="status" id="status">
+            <span class="dot" id="dot"></span>
+            <span id="statusText">未初始化</span>
+          </span>
+        </div>
+
+        <div class="grid">
+          <div>
+            <textarea id="result" placeholder="识别结果会显示在这里..." spellcheck="false"></textarea>
+            <div class="small">
+              - 录音会在你点击“停止并识别”后上传到 <code>/transcribe</code>。<br />
+              - “实时识别”会通过 WebSocket 向 <code>/ws/asr</code> 发送 16kHz PCM 音频流，并持续返回 partial 文本。<br />
+              - 浏览器通常会录成 <code>audio/webm</code>；后端已支持 <code>.webm</code>。<br />
+              - 如果你把后端跑在别的地址，请直接用该地址打开本页面（或修改 JS 里的 baseUrl）。
+            </div>
+          </div>
+          <div class="kvs">
+            <div class="kv">
+              <div class="k">后端</div>
+              <div class="v" id="backendUrl"></div>
+            </div>
+            <div class="kv">
+              <div class="k">实时 WS</div>
+              <div class="v" id="wsUrl">-</div>
+            </div>
+            <div class="kv">
+              <div class="k">音频格式</div>
+              <div class="v" id="mimeType">-</div>
+            </div>
+            <div class="kv">
+              <div class="k">本次时长</div>
+              <div class="v" id="duration">-</div>
+            </div>
+            <div class="kv">
+              <div class="k">识别语言</div>
+              <div class="v" id="lang">-</div>
+            </div>
+            <div class="kv">
+              <div class="k">状态/错误</div>
+              <div class="v" id="lastError">-</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <h2 class="subtitle">DashScope 语音合成（<code>/tts</code>）</h2>
+      <div class="panel">
+        <div class="row">
+          <button id="btnTts" class="primary">合成并播放</button>
+          <div class="voice-selector">
+            <label for="ttsVoice">语音：</label>
+            <select id="ttsVoice"></select>
+          </div>
+        </div>
+        <textarea id="ttsText" class="tts-text" placeholder="输入要合成的文字，点击「合成并播放」…" spellcheck="false"></textarea>
+        <audio id="ttsAudio" class="audio-full" controls playsinline></audio>
+        <div class="small" id="ttsHint"></div>
+      </div>
+    </div>
+
+    <script>
+      // 如果后端不是同源，可改成 "http://127.0.0.1:8000"
+      const baseUrl = "";
+
+      const $ = (id) => document.getElementById(id);
+      const btnInit = $("btnInit");
+      const btnLive = $("btnLive");
+      const btnLiveStop = $("btnLiveStop");
+      const btnStart = $("btnStart");
+      const btnStop = $("btnStop");
+      const btnClear = $("btnClear");
+      const statusText = $("statusText");
+      const dot = $("dot");
+      const result = $("result");
+      const backendUrl = $("backendUrl");
+      const wsUrlEl = $("wsUrl");
+      const mimeTypeEl = $("mimeType");
+      const durationEl = $("duration");
+      const langEl = $("lang");
+      const lastErrorEl = $("lastError");
+
+      backendUrl.textContent = (baseUrl || window.location.origin) + "/transcribe";
+      wsUrlEl.textContent = ((baseUrl ? baseUrl.replace(/^http/, "ws") : (location.protocol === "https:" ? "wss://" : "ws://") + location.host) + "/ws/asr");
+
+      // 获取 TTS 语音列表（GET /tts/voices → { version, voices: [{ voice, name, ... }] }）
+      async function fetchTtsVoicesPayload() {
+        try {
+          const resp = await fetch((baseUrl || "") + "/tts/voices");
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
+          return await resp.json();
+        } catch (e) {
+          console.error("获取语音列表失败:", e);
+          return { voices: [{ voice: "Cherry", name: "芊悦" }] };
+        }
+      }
+
+      async function initVoiceSelector() {
+        const ttsVoice = $("ttsVoice");
+        const data = await fetchTtsVoicesPayload();
+        const list = Array.isArray(data.voices) ? data.voices : Array.isArray(data) ? data : [];
+        ttsVoice.innerHTML = "";
+        if (list.length === 0) {
+          const opt = document.createElement("option");
+          opt.value = "Cherry";
+          opt.textContent = "Cherry";
+          opt.selected = true;
+          ttsVoice.appendChild(opt);
+          return;
+        }
+        list.forEach((item) => {
+          const id = typeof item === "string" ? item : item.voice;
+          if (!id) return;
+          const name = typeof item === "string" ? item : item.name || id;
+          const opt = document.createElement("option");
+          opt.value = id;
+          opt.textContent = name === id ? id : `${id}（${name}）`;
+          if (id === "Cherry") opt.selected = true;
+          ttsVoice.appendChild(opt);
+        });
+        if (!ttsVoice.value && ttsVoice.options.length) {
+          ttsVoice.options[0].selected = true;
+        }
+      }
+
+      const btnTts = $("btnTts");
+      const ttsText = $("ttsText");
+      const ttsAudio = $("ttsAudio");
+      const ttsHint = $("ttsHint");
+      let ttsObjectUrl = null;
+
+      function setTtsHint(msg, isErr = false) {
+        ttsHint.textContent = msg || "";
+        ttsHint.classList.toggle("err", !!isErr);
+      }
+
+      async function runTts() {
+        setTtsHint("");
+        const text = ttsText.value.trim();
+        if (!text) {
+          setTtsHint("请输入要合成的文字", true);
+          return;
+        }
+        btnTts.disabled = true;
+        try {
+          const ttsVoice = $("ttsVoice").value; // 获取选择的语音
+          const resp = await fetch((baseUrl || "") + "/tts", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text, voice: ttsVoice }), // 添加语音参数
+          });
+          const raw = await resp.text();
+          let data;
+          try {
+            data = JSON.parse(raw);
+          } catch {
+            throw new Error(raw.slice(0, 300));
+          }
+          if (!resp.ok) {
+            const detail = typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail || data);
+            throw new Error(`HTTP ${resp.status}: ${detail}`);
+          }
+          if (data.status_code != null && Number(data.status_code) !== 200) {
+            throw new Error(data.message || data.code || JSON.stringify(data).slice(0, 300));
+          }
+          const audioMeta = data.output && data.output.audio;
+          const wavUrl = audioMeta && audioMeta.url;
+          const b64 = audioMeta && audioMeta.data;
+          if (ttsObjectUrl) {
+            URL.revokeObjectURL(ttsObjectUrl);
+            ttsObjectUrl = null;
+          }
+          ttsAudio.onerror = () =>
+            setTtsHint("音频加载失败（链接跨域、过期或网络问题；可改用响应里的 url 下载试听）", true);
+          if (wavUrl && String(wavUrl).trim()) {
+            ttsAudio.src = String(wavUrl).trim();
+          } else if (b64 && String(b64).trim()) {
+            const bin = atob(String(b64).trim());
+            const u8 = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+            const blob = new Blob([u8], { type: "audio/wav" });
+            ttsObjectUrl = URL.createObjectURL(blob);
+            ttsAudio.src = ttsObjectUrl;
+          } else {
+            throw new Error("响应中无 output.audio.url / output.audio.data");
+          }
+          ttsAudio.load();
+          await ttsAudio.play();
+          setTtsHint("已开始播放（也可用手动控件重播）", false);
+        } catch (e) {
+          setTtsHint(e?.message || String(e), true);
+          ttsAudio.removeAttribute("src");
+        } finally {
+          btnTts.disabled = false;
+        }
+      }
+
+      let stream = null;
+      let recorder = null;
+      let chunks = [];
+      let startedAt = 0;
+      let chosenMimeType = "";
+      let live = {
+        ws: null,
+        ctx: null,
+        source: null,
+        proc: null,
+        inputRate: 0,
+        sentSamples: 0,
+        startedAt: 0,
+      };
+
+      function setStatus(text, mode = "idle") {
+        statusText.textContent = text;
+        dot.className = "dot";
+        if (mode === "ok") dot.classList.add("ok");
+        if (mode === "rec") dot.classList.add("rec");
+      }
+
+      function setError(msg) {
+        lastErrorEl.textContent = msg || "-";
+        if (msg) lastErrorEl.classList.add("err");
+        else lastErrorEl.classList.remove("err");
+      }
+
+      function pickMimeType() {
+        const candidates = [
+          "audio/webm;codecs=opus",
+          "audio/webm",
+          "audio/ogg;codecs=opus",
+          "audio/ogg",
+        ];
+        for (const t of candidates) {
+          if (window.MediaRecorder && MediaRecorder.isTypeSupported(t)) return t;
+        }
+        return "";
+      }
+
+      function extForMime(mime) {
+        if (!mime) return "webm";
+        const m = mime.toLowerCase();
+        if (m.includes("ogg")) return "ogg";
+        if (m.includes("webm")) return "webm";
+        return "webm";
+      }
+
+      async function initMic() {
+        setError("");
+        if (!navigator.mediaDevices?.getUserMedia) {
+          setError("当前浏览器不支持 getUserMedia");
+          setStatus("不支持麦克风", "idle");
+          return;
+        }
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true,
+            },
+            video: false,
+          });
+          chosenMimeType = pickMimeType();
+          mimeTypeEl.textContent = chosenMimeType || "(浏览器默认)";
+          btnStart.disabled = false;
+          btnLive.disabled = false;
+          setStatus("已授权，可开始录音", "ok");
+        } catch (e) {
+          setError(e?.message || String(e));
+          setStatus("麦克风授权失败", "idle");
+        }
+      }
+
+      function downsampleTo16k(float32, inRate) {
+        const outRate = 16000;
+        if (!inRate || inRate === outRate) return float32;
+        const ratio = inRate / outRate;
+        const outLen = Math.floor(float32.length / ratio);
+        const out = new Float32Array(outLen);
+        let pos = 0;
+        for (let i = 0; i < outLen; i++) {
+          const idx = Math.floor(pos);
+          const next = Math.min(idx + 1, float32.length - 1);
+          const frac = pos - idx;
+          out[i] = float32[idx] * (1 - frac) + float32[next] * frac;
+          pos += ratio;
+        }
+        return out;
+      }
+
+      function floatToInt16LE(float32) {
+        const out = new Int16Array(float32.length);
+        for (let i = 0; i < float32.length; i++) {
+          let s = Math.max(-1, Math.min(1, float32[i]));
+          out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+        }
+        return out.buffer;
+      }
+
+      async function startLive() {
+        setError("");
+        if (!stream) {
+          setError("未初始化麦克风");
+          return;
+        }
+        if (live.ws) return;
+
+        const wsUrl = wsUrlEl.textContent;
+        const ws = new WebSocket(wsUrl);
+        ws.binaryType = "arraybuffer";
+
+        ws.onmessage = (ev) => {
+          try {
+            const msg = JSON.parse(ev.data);
+            if (msg.type === "ready") {
+              setStatus("实时连接已建立，开始采集...", "rec");
+            } else if (msg.type === "partial") {
+              langEl.textContent = msg.language ?? "-";
+              const t = (msg.text ?? "").trim();
+              if (t) {
+                // 这里用“覆盖显示”为主，避免刷屏；你也可以改成追加
+                result.value = t;
+              }
+            } else if (msg.type === "error") {
+              setError(msg.message || "实时识别错误");
+            }
+          } catch {
+            // ignore non-json
+          }
+        };
+
+        ws.onerror = () => setError("WebSocket 连接失败");
+        ws.onclose = () => {
+          if (live.ws) {
+            stopLive();
+          }
+        };
+
+        await new Promise((resolve, reject) => {
+          ws.onopen = resolve;
+          ws.onerror = reject;
+        });
+
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const source = ctx.createMediaStreamSource(stream);
+        // ScriptProcessorNode 兼容性最好（虽然已废弃但 Chrome/Edge 仍可用）
+        const proc = ctx.createScriptProcessor(4096, 1, 1);
+
+        live = {
+          ws,
+          ctx,
+          source,
+          proc,
+          inputRate: ctx.sampleRate,
+          sentSamples: 0,
+          startedAt: Date.now(),
+        };
+
+        proc.onaudioprocess = (e) => {
+          if (!live.ws || live.ws.readyState !== WebSocket.OPEN) return;
+          const ch0 = e.inputBuffer.getChannelData(0);
+          const down = downsampleTo16k(ch0, live.inputRate);
+          live.sentSamples += down.length;
+          live.ws.send(floatToInt16LE(down));
+
+          const ms = Date.now() - live.startedAt;
+          durationEl.textContent = (ms / 1000).toFixed(2) + "s（实时）";
+        };
+
+        source.connect(proc);
+        proc.connect(ctx.destination);
+
+        btnLive.disabled = true;
+        btnLiveStop.disabled = false;
+        btnStart.disabled = true;
+        btnStop.disabled = true;
+        setStatus("实时识别中", "rec");
+      }
+
+      function stopLive() {
+        try { live.proc && live.proc.disconnect(); } catch {}
+        try { live.source && live.source.disconnect(); } catch {}
+        try { live.ctx && live.ctx.close(); } catch {}
+        try { live.ws && live.ws.close(); } catch {}
+
+        live = { ws: null, ctx: null, source: null, proc: null, inputRate: 0, sentSamples: 0, startedAt: 0 };
+        btnLive.disabled = !stream;
+        btnLiveStop.disabled = true;
+        btnStart.disabled = !stream;
+        setStatus("已停止实时（可继续操作）", "ok");
+      }
+
+      function startRec() {
+        setError("");
+        if (!stream) {
+          setError("未初始化麦克风");
+          return;
+        }
+        chunks = [];
+        const options = chosenMimeType ? { mimeType: chosenMimeType } : undefined;
+        recorder = new MediaRecorder(stream, options);
+        recorder.ondataavailable = (ev) => {
+          if (ev.data && ev.data.size > 0) chunks.push(ev.data);
+        };
+        recorder.onerror = (ev) => setError(ev?.error?.message || "录音出错");
+
+        recorder.start(250);
+        startedAt = Date.now();
+        durationEl.textContent = "录音中...";
+        langEl.textContent = "-";
+        setStatus("录音中", "rec");
+        btnStart.disabled = true;
+        btnStop.disabled = false;
+      }
+
+      async function stopAndTranscribe() {
+        setError("");
+        if (!recorder) return;
+
+        const rec = recorder;
+        recorder = null;
+
+        const stopped = new Promise((resolve) => {
+          rec.onstop = resolve;
+        });
+        rec.stop();
+        await stopped;
+
+        const ms = Date.now() - startedAt;
+        durationEl.textContent = (ms / 1000).toFixed(2) + "s";
+        setStatus("上传并识别中...", "ok");
+        btnStop.disabled = true;
+
+        const mime = rec.mimeType || chosenMimeType || "audio/webm";
+        const blob = new Blob(chunks, { type: mime });
+        const filename = `mic_${new Date().toISOString().replaceAll(":", "-")}.${extForMime(mime)}`;
+        const file = new File([blob], filename, { type: mime });
+
+        const fd = new FormData();
+        fd.append("file", file);
+
+        try {
+          const resp = await fetch((baseUrl || "") + "/transcribe", {
+            method: "POST",
+            body: fd,
+          });
+          const text = await resp.text();
+          if (!resp.ok) {
+            throw new Error(`HTTP ${resp.status}: ${text}`);
+          }
+          const data = JSON.parse(text);
+          langEl.textContent = data.language ?? "-";
+          const line = (data.text ?? "").trim();
+          if (line) {
+            result.value = (result.value ? result.value.replace(/\s*$/,"\\n") : "") + line + "\\n";
+          }
+          setStatus("完成（可继续录音）", "ok");
+        } catch (e) {
+          setError(e?.message || String(e));
+          setStatus("识别失败", "idle");
+        } finally {
+          btnStart.disabled = false;
+        }
+      }
+
+      btnInit.addEventListener("click", initMic);
+      btnLive.addEventListener("click", startLive);
+      btnLiveStop.addEventListener("click", stopLive);
+      btnStart.addEventListener("click", startRec);
+      btnStop.addEventListener("click", stopAndTranscribe);
+      btnClear.addEventListener("click", () => {
+        result.value = "";
+        setError("");
+      });
+      btnTts.addEventListener("click", runTts);
+
+      setStatus("未初始化", "idle");
+      initVoiceSelector(); // 初始化语音选择器
+    </script>
+    <style>
+      .voice-selector {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 14px;
+      }
+      #ttsVoice {
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 6px 8px;
+        min-width: 100px;
+      }
+      #ttsVoice:focus {
+        outline: none;
+        border-color: var(--accent);
+      }</style>
+  </body>
+</html>

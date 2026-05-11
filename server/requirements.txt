@@ -1,0 +1,7 @@
+fastapi
+uvicorn[standard]
+torch
+qwen-asr
+soundfile
+python-dotenv
+dashscope
