@@ -5,9 +5,10 @@ import vue from '@vitejs/plugin-vue'
 export default defineConfig({
     plugins: [vue()],
     server: {
+        host: '0.0.0.0',
         proxy: {
             '/openclaw-api': {
-                target: 'http://127.0.0.1:18789',
+                target: 'http://192.168.31.197:18789',
                 changeOrigin: true,
                 rewrite: (path) => path.replace(/^\/openclaw-api/, ''),
             },
