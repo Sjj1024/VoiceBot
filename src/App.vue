@@ -80,6 +80,53 @@
                 <span class="live-value">{{ userText || '—' }}</span>
             </div>
 
+            <div class="tts-voice-row">
+                <span class="live-label">播报音色</span>
+                <div class="tts-voice-controls">
+                    <select
+                        v-model="selectedTtsVoice"
+                        class="tts-select"
+                        :disabled="ttsVoicesLoading && ttsVoices.length === 0"
+                    >
+                        <option
+                            v-if="ttsVoicesLoading && ttsVoices.length === 0"
+                            :value="selectedTtsVoice"
+                        >
+                            正在加载音色列表…
+                        </option>
+                        <option
+                            v-if="!voicesHasCurrent && ttsVoices.length > 0"
+                            :value="selectedTtsVoice"
+                        >
+                            {{ selectedTtsVoice }}（当前）
+                        </option>
+                        <option
+                            v-for="v in ttsVoices"
+                            :key="v.voice"
+                            :value="v.voice"
+                        >
+                            {{ voiceOptionLabel(v) }}
+                        </option>
+                        <option
+                            v-if="ttsVoices.length === 0 && !ttsVoicesLoading"
+                            :value="selectedTtsVoice"
+                        >
+                            {{ selectedTtsVoice }}（列表不可用，仍按此音色请求
+                            TTS）
+                        </option>
+                    </select>
+                    <span v-if="ttsVoicesLoading" class="tts-meta"
+                        >加载音色…</span
+                    >
+                    <span v-else-if="ttsVoicesError" class="tts-meta err">{{
+                        ttsVoicesError
+                    }}</span>
+                    <span v-else-if="ttsVoicesVersion" class="tts-meta">{{
+                        ttsVoicesVersion
+                    }}</span>
+                </div>
+            </div>
+
             <div class="actions">
                 <button
                     type="button"
@@ -108,7 +155,7 @@
 </template>
 
 <script setup>
-import { computed, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 
 const messages = ref([])
 const chatScrollEl = ref(null)
@@ -138,7 +185,74 @@ const openclawBase = (import.meta.env.VITE_OPENCLAW_URL || '').trim()
 const openclawApiKey = (import.meta.env.VITE_OPENCLAW_API_KEY || '').trim()
 const openclawModel = (import.meta.env.VITE_OPENCLAW_MODEL || '').trim()
 const ttsBase = (import.meta.env.VITE_TTS_URL || '').trim()
-const ttsVoice = (import.meta.env.VITE_TTS_VOICE || 'Cherry').trim() || 'Cherry'
+const ttsVoicesPath = (
+    import.meta.env.VITE_TTS_VOICES_PATH || '/tts/voices'
+).trim()
+const ttsVoiceDefault =
+    (import.meta.env.VITE_TTS_VOICE || 'Cherry').trim() || 'Cherry'
+
+const TTS_VOICE_STORAGE_KEY = 'vue3speech-tts-voice'
+const readStoredTtsVoice = () => {
+    try {
+        const v = localStorage.getItem(TTS_VOICE_STORAGE_KEY)
+        return v && v.trim() ? v.trim() : ''
+    } catch {
+        return ''
+    }
+}
+const selectedTtsVoice = ref(readStoredTtsVoice() || ttsVoiceDefault)
+const ttsVoices = ref([])
+const ttsVoicesLoading = ref(false)
+const ttsVoicesError = ref('')
+const ttsVoicesVersion = ref('')
+
+watch(selectedTtsVoice, (v) => {
+    try {
+        localStorage.setItem(TTS_VOICE_STORAGE_KEY, v)
+    } catch {
+        /* ignore */
+    }
+})
+
+const voicesHasCurrent = computed(() =>
+    ttsVoices.value.some((x) => x.voice === selectedTtsVoice.value)
+)
+
+const voiceOptionLabel = (v) => {
+    if (!v) return ''
+    const tail = v.description ? ` · ${v.description}` : ''
+    return `${v.voice} — ${v.name}${tail}`
+}
+
+const loadTtsVoices = async () => {
+    const base = (ttsBase || '/speech-api').replace(/\/+$/, '')
+    const path = ttsVoicesPath.startsWith('/')
+        ? ttsVoicesPath
+        : `/${ttsVoicesPath}`
+    ttsVoicesLoading.value = true
+    ttsVoicesError.value = ''
+    try {
+        const res = await fetch(`${base}${path}`)
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        const data = await res.json()
+        ttsVoices.value = Array.isArray(data.voices) ? data.voices : []
+        ttsVoicesVersion.value = data.version ? `voices ${data.version}` : ''
+        const ids = new Set(ttsVoices.value.map((v) => v.voice))
+        if (ttsVoices.value.length && !ids.has(selectedTtsVoice.value)) {
+            selectedTtsVoice.value = ttsVoices.value[0].voice
+        }
+    } catch (e) {
+        ttsVoicesError.value = e?.message || String(e)
+        ttsVoicesVersion.value = ''
+        console.warn('loadTtsVoices failed:', e)
+    } finally {
+        ttsVoicesLoading.value = false
+    }
+}
+
+onMounted(() => {
+    void loadTtsVoices()
+})
 /** 语音识别服务根地址；开发环境可配 /speech-api（vite 已代理到局域网转写服务） */
 const whisperBase = (import.meta.env.VITE_WHISPER_URL || '').trim()
 /** multipart 里音频字段名，需与后端一致（常见 audio 或 file） */
@@ -243,8 +357,18 @@ const playAudioUrlAndWait = (url) =>
         void audio.play().catch(() => resolve())
     })
 
+/** 兼容百炼式 JSON：output.audio.url；旧版仅返回顶层 url */
+const ttsAudioUrlFromResponse = (data) => {
+    if (!data || typeof data !== 'object') return ''
+    const nested = data.output?.audio?.url
+    if (typeof nested === 'string' && nested.trim()) return nested.trim()
+    const flat = data.url
+    if (typeof flat === 'string' && flat.trim()) return flat.trim()
+    return ''
+}
+
 const speakAndWait = async (text) => {
-    // 优先：DashScope TTS（更自然）。失败则回退浏览器本地朗读。
+    // 优先：HTTP TTS（返回可播放 url）。失败则回退浏览器本地朗读。
     const base = ttsBase || '/speech-api'
     try {
         const res = await fetch(`${base.replace(/\/+$/, '')}/tts`, {
@@ -252,14 +376,19 @@ const speakAndWait = async (text) => {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 text,
-                voice: ttsVoice,
+                voice: selectedTtsVoice.value,
                 language_type: 'Chinese',
             }),
         })
         if (!res.ok) throw new Error(`TTS HTTP ${res.status}`)
         const data = await res.json()
-        const url = data?.url
-        if (typeof url !== 'string' || !url) throw new Error('TTS 缺少 url')
+        if (data?.status_code != null && Number(data.status_code) !== 200) {
+            throw new Error(
+                data.message || `TTS status_code ${data.status_code}`
+            )
+        }
+        const url = ttsAudioUrlFromResponse(data)
+        if (!url) throw new Error('TTS 响应缺少可播放 url（output.audio.url）')
         window.speechSynthesis.cancel()
         await playAudioUrlAndWait(url)
         return
@@ -1039,6 +1168,45 @@ const callOpenClaw = async (conversationMessages) => {
     color: #374151;
     line-height: 1.45;
     min-height: 1.45em;
+}
+
+.tts-voice-row {
+    margin-top: 12px;
+    padding: 10px 12px;
+    border-radius: 12px;
+    background: #f0f9ff;
+    border: 1px solid #e0f2fe;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.tts-voice-controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+}
+
+.tts-select {
+    flex: 1;
+    min-width: 0;
+    max-width: 100%;
+    font-size: 0.8125rem;
+    padding: 8px 10px;
+    border-radius: 10px;
+    border: 1px solid #bae6fd;
+    background: #fff;
+    color: #0c4a6e;
+}
+
+.tts-meta {
+    font-size: 0.75rem;
+    color: #64748b;
+}
+
+.tts-meta.err {
+    color: #b91c1c;
 }
 
 .actions {
