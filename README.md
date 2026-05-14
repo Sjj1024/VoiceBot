@@ -70,3 +70,11 @@ npm run dev
 ## 许可证
 
 私有项目（`package.json` 中 `"private": true`）；对外分发时请自行补充许可证说明。
+
+## SKILL 是输入
+
+Skill 是告诉 ai 输入规则，以及注意事项
+
+## MCP 是输出
+
+mcp 是告诉 ai 有哪些能力可以做哪些事
